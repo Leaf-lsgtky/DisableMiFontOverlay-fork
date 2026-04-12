@@ -1,8 +1,5 @@
 #include <android/log.h>
-#include <string>
-#include <vector>
-#include <sstream>
-#include <unistd.h>
+#include <sys/types.h>
 #include "zygisk.hpp"
 
 static constexpr auto TAG = "DisableMiFontOverlay";
@@ -18,44 +15,53 @@ public:
 
     void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
         api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
-
-        if (!args) return;
-
-        const char *rawDir = env->GetStringUTFChars(args->app_data_dir, nullptr);
-        if (!rawDir) return;
-
-        std::string dir(rawDir);
-        env->ReleaseStringUTFChars(args->app_data_dir, rawDir);
     }
 
     void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
-        injectDex();
+        disableMiFont();
     }
 
     void preServerSpecialize(zygisk::ServerSpecializeArgs *args) override {
         api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
     }
 
+    void postServerSpecialize(const zygisk::ServerSpecializeArgs *args) override {
+        disableMiFont();
+    }
+
 private:
     zygisk::Api *api = nullptr;
     JNIEnv *env = nullptr;
 
-    void injectDex() {
-        jclass fontSettingsClass = env->FindClass("miui/util/font/FontSettings");
-        if (fontSettingsClass == nullptr) {
-            LOGD("Failed to find FontSettings class");
-            return;
+    bool setStaticBooleanField(const char *className, const char *fieldName, jboolean value) {
+        jclass clazz = env->FindClass(className);
+        if (clazz == nullptr) {
+            env->ExceptionClear();
+            LOGD("Class not found: %s", className);
+            return false;
         }
 
-        jfieldID hasCustomFontField = env->GetStaticFieldID(fontSettingsClass, "HAS_MIUI_VAR_FONT",
-                                                            "Z");
-        if (hasCustomFontField == nullptr) {
-            LOGD("Failed to find HAS_MIUI_VAR_FONT field");
-            return;
+        jfieldID field = env->GetStaticFieldID(clazz, fieldName, "Z");
+        if (field == nullptr) {
+            env->ExceptionClear();
+            LOGD("Field not found: %s.%s", className, fieldName);
+            return false;
         }
 
-        env->SetStaticBooleanField(fontSettingsClass, hasCustomFontField, JNI_FALSE);
-        LOGD("Successfully set HAS_MIUI_VAR_FONT to false");
+        env->SetStaticBooleanField(clazz, field, value);
+        LOGD("Set %s.%s = %s", className, fieldName, value ? "true" : "false");
+        return true;
+    }
+
+    void disableMiFont() {
+        // Disable isMiuiFontEnabled(): HAS_MIUI_VAR_FONT && MIUI_OPTIMIZE_ENABLED && ...
+        setStaticBooleanField("miui/util/font/FontSettings", "HAS_MIUI_VAR_FONT", JNI_FALSE);
+        setStaticBooleanField("miui/util/font/FontSettings", "MIUI_OPTIMIZE_ENABLED", JNI_FALSE);
+
+        // Android 16 (HyperOS 3.0): checkSupportMiuiFont() uses Flags.newHyperFont() path
+        // which returns !isCtsBlockListPackage, bypassing HAS_MIUI_VAR_FONT entirely.
+        // Setting isCtsBlockListPackage = true makes checkSupportMiuiFont() return false.
+        setStaticBooleanField("miui/util/font/FontScaleUtil", "isCtsBlockListPackage", JNI_TRUE);
     }
 };
 

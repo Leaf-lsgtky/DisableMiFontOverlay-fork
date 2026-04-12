@@ -9,8 +9,11 @@ java {
 
 android {
     namespace = "android"
-    compileSdk = 36
-    compileSdkMinor = 1
+    compileSdk {
+        version = release(36) {
+            minorApiLevel = 1
+        }
+    }
     buildToolsVersion = "36.1.0"
     ndkVersion = "29.0.14206865"
 }

@@ -21,14 +21,16 @@ public:
     void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
         const char *nice_name = env->GetStringUTFChars(args->nice_name, nullptr);
         if (nice_name == nullptr) {
-            disableMiFont(true);
+            LOGD("nice_name is null, skipping");
             return;
         }
         std::string pkgName(nice_name);
         env->ReleaseStringUTFChars(args->nice_name, nice_name);
 
         bool isThirdParty = checkIsThirdParty(pkgName, args->uid);
-        disableMiFont(isThirdParty);
+        LOGD("Process: %s (uid: %d) -> isThirdParty: %s", pkgName.c_str(), args->uid, isThirdParty ? "YES" : "NO");
+        
+        applyFontFix(isThirdParty);
     }
 
     void preServerSpecialize(zygisk::ServerSpecializeArgs *args) override {
@@ -36,7 +38,8 @@ public:
     }
 
     void postServerSpecialize(const zygisk::ServerSpecializeArgs *args) override {
-        disableMiFont(false);
+        LOGD("System Server started, disabling font overlay");
+        applyFontFix(false);
     }
 
 private:
@@ -46,24 +49,30 @@ private:
     bool checkIsThirdParty(const std::string& pkgName, int uid) {
         if (uid < 10000) return false;
 
-        // 1. Check package name prefixes (from 1.txt)
+        // 1. Check common system package prefixes (from 1.txt + common MIUI)
         if (pkgName == "android" || 
             pkgName.find("com.miui.") == 0 || 
+            pkgName.find("miui.") == 0 || 
             pkgName.find("com.xiaomi.") == 0 || 
+            pkgName.find("com.mi.") == 0 || 
             pkgName.find("com.android.") == 0) {
             return false;
         }
 
-        // 2. Get ApplicationInfo flags via ServiceManager (the robust way)
+        // 2. Get ApplicationInfo flags via ServiceManager
         int flags = getAppFlags(pkgName);
         if (flags != -1) {
             bool isSystem = (flags & 0x1);          // FLAG_SYSTEM
             bool isUpdated = (flags & 0x80);        // FLAG_UPDATED_SYSTEM_APP
             
-            // Smali logic: if (isSystem && !isUpdated) -> is_system_app
+            // Smali logic: if (isSystem && !isUpdated) -> is_system_app (false)
             if (isSystem && !isUpdated) {
                 return false;
             }
+        } else {
+            // If getAppFlags failed, default to system app for safety
+            LOGD("getAppFlags failed for %s, assuming system app", pkgName.c_str());
+            return false;
         }
 
         return true;
@@ -86,20 +95,32 @@ private:
         if (ipm == nullptr) { env->ExceptionClear(); return -1; }
 
         jclass ipmClass = env->GetObjectClass(ipm);
-        // getApplicationInfo(String packageName, long flags, int userId) - Note: flags type varies by Android version
-        // We try the common signature first.
-        jmethodID getAiMethod = env->GetMethodID(ipmClass, "getApplicationInfo", "(Ljava/lang/String;JI)Landroid/content/pm/ApplicationInfo;");
-        if (getAiMethod == nullptr) {
+        // Common signatures for getApplicationInfo
+        const char* signatures[] = {
+            "(Ljava/lang/String;JI)Landroid/content/pm/ApplicationInfo;", // Modern Android
+            "(Ljava/lang/String;II)Landroid/content/pm/ApplicationInfo;"  // Legacy Android
+        };
+
+        jmethodID getAiMethod = nullptr;
+        for (const char* sig : signatures) {
+            getAiMethod = env->GetMethodID(ipmClass, "getApplicationInfo", sig);
+            if (getAiMethod != nullptr) break;
             env->ExceptionClear();
-            // Fallback for older Android versions where flags is int
-            getAiMethod = env->GetMethodID(ipmClass, "getApplicationInfo", "(Ljava/lang/String;II)Landroid/content/pm/ApplicationInfo;");
         }
         
-        if (getAiMethod == nullptr) { env->ExceptionClear(); return -1; }
+        if (getAiMethod == nullptr) { return -1; }
 
         jstring jPkgName = env->NewStringUTF(pkgName.c_str());
-        // userId 0 is owner/main user
-        jobject appInfo = env->CallObjectMethod(ipm, getAiMethod, jPkgName, (jlong)0, 0);
+        jobject appInfo = nullptr;
+        
+        // Try calling based on the found signature
+        // We use userId 0 (owner)
+        appInfo = env->CallObjectMethod(ipm, getAiMethod, jPkgName, (jlong)0, 0);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            // Try with int flags if long failed
+            appInfo = env->CallObjectMethod(ipm, getAiMethod, jPkgName, (jint)0, 0);
+        }
         env->DeleteLocalRef(jPkgName);
 
         if (appInfo == nullptr) { env->ExceptionClear(); return -1; }
@@ -125,11 +146,10 @@ private:
         }
 
         env->SetStaticBooleanField(clazz, field, value);
-        LOGD("Set %s.%s = %s", className, fieldName, value ? "true" : "false");
         return true;
     }
 
-    void disableMiFont(bool isThirdParty) {
+    void applyFontFix(bool isThirdParty) {
         setStaticBooleanField("miui/util/font/FontSettings", "HAS_MIUI_VAR_FONT", JNI_FALSE);
         setStaticBooleanField("miui/util/font/FontSettings", "MIUI_OPTIMIZE_ENABLED", JNI_FALSE);
         setStaticBooleanField("miui/util/font/FontScaleUtil", "isCtsBlockListPackage", isThirdParty ? JNI_TRUE : JNI_FALSE);

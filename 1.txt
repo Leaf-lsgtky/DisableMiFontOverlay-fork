@@ -1,0 +1,44 @@
+
+iget v0, p0, Landroid/content/pm/ApplicationInfo;->flags:I
+and-int/lit8 v1, v0, 0x1
+if-eqz v1, :check_updated_system
+goto :is_system_app
+:check_updated_system
+and-int/lit16 v0, v0, 0x80
+if-eqz v0, :check_package_name
+goto :is_system_app
+:check_package_name
+sget-object v1, Lmiui/util/font/FontScaleUtil;->packageName:Ljava/lang/String;
+if-nez v1, :check_miui
+goto :is_third_party
+:check_miui
+const-string v0, "com.miui."
+invoke-virtual {v1, v0}, Ljava/lang/String;->startsWith(Ljava/lang/String;)Z
+move-result v0
+if-eqz v0, :check_xiaomi
+goto :is_system_app
+:check_xiaomi
+const-string v0, "com.xiaomi."
+invoke-virtual {v1, v0}, Ljava/lang/String;->startsWith(Ljava/lang/String;)Z
+move-result v0
+if-eqz v0, :check_android
+goto :is_system_app
+:check_android
+const-string v0, "com.android."
+invoke-virtual {v1, v0}, Ljava/lang/String;->startsWith(Ljava/lang/String;)Z
+move-result v0
+if-eqz v0, :check_framework
+goto :is_system_app
+:check_framework
+const-string v0, "android"
+invoke-virtual {v1, v0}, Ljava/lang/String;->equals(Ljava/lang/Object;)Z
+move-result v0
+if-eqz v0, :is_third_party
+goto :is_system_app
+:is_third_party
+const/4 v0, 0x1
+goto :write_flag
+:is_system_app
+const/4 v0, 0x0
+:write_flag
+sput-boolean v0, Lmiui/util/font/FontScaleUtil;->isCtsBlockListPackage:Z
